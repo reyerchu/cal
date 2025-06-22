@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_USER: cal
+      POSTGRES_PASSWORD: cal
+      POSTGRES_DB: cal
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  calcom:
+    image: calcom/cal.com:latest
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "5000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - calcom_data:/calcom
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  db_data:
+  calcom_data: 

@@ -1,0 +1,304 @@
+# 在同一台 Apache 伺服器上掛載不同前後端服務的做法
+
+## 1. 服務架構概覽
+
+defintek.io 網站目前掛載了以下服務：
+
+- **WordPress** (主要網站)
+- **blockchain-demo** (Node.js, port 3010)
+- **public-private-key-demo** (Node.js, port 3001) 
+- **s2t** (FastAPI backend port 8002 + React frontend)
+- **cal** (Cal.com, port 5000) - 使用子域名 cal.defintek.io
+
+## 2. Apache2 配置模式
+
+### 基本 VirtualHost 結構
+```apache
+<VirtualHost *:443>
+    ServerName defintek.io
+    ServerAlias www.defintek.io
+    DocumentRoot /var/www/defintek.io/public_html
+    
+    # SSL 配置
+    SSLCertificateFile    /etc/letsencrypt/live/defintek.io/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/defintek.io/privkey.pem
+    
+    # 安全標頭
+    Header always set Strict-Transport-Security "max-age=15552000; includeSubdomains; preload"
+    
+    # 各服務的代理配置...
+</VirtualHost>
+```
+
+## 3. 不同類型的服務配置模式
+
+### 模式 A: 純後端代理 (如 blockchain-demo)
+```apache
+# 代理到後端服務
+ProxyPass /blockchain-demo http://localhost:3010/
+ProxyPassReverse /blockchain-demo http://localhost:3010/
+
+# 靜態檔案直接服務
+Alias /blockchain-demo/stylesheets "/var/www/defintek.io/public_html/blockchain-demo/public/stylesheets"
+Alias /blockchain-demo/javascripts "/var/www/defintek.io/public_html/blockchain-demo/public/javascripts"
+
+# 重寫規則處理所有路徑
+RewriteEngine On
+RewriteCond %{REQUEST_URI} ^/blockchain-demo
+RewriteCond %{REQUEST_URI} !^/blockchain-demo/(stylesheets|javascripts|images|favicon.ico)
+RewriteRule ^/blockchain-demo/(.*) http://localhost:3010/$1 [P,L]
+```
+
+### 模式 B: 前後端分離 (如 s2t)
+```apache
+# 後端 API 代理
+<Location /s2t/api>
+    ProxyPass http://127.0.0.1:8002/s2t/api
+    ProxyPassReverse http://127.0.0.1:8002/s2t/api
+</Location>
+
+# 前端靜態檔案
+Alias /s2t/static /var/www/defintek.io/public_html/s2t/static
+<Directory /var/www/defintek.io/public_html/s2t/static>
+    Options -Indexes +FollowSymLinks
+    AllowOverride All
+    Require all granted
+</Directory>
+
+# 排除 API 路徑的重寫
+RewriteCond %{REQUEST_URI} ^/s2t/api
+RewriteRule ^ - [L]
+
+# React Router 支援
+RewriteCond %{REQUEST_URI} ^/s2t
+RewriteCond %{REQUEST_URI} !^/s2t/static
+RewriteCond %{REQUEST_URI} !^/s2t/api
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^/s2t(.*)$ /s2t/static/index.html [L]
+```
+
+### 模式 C: 子域名配置 (如 cal.defintek.io)
+```apache
+<VirtualHost *:443>
+    ServerName cal.defintek.io
+    DocumentRoot /var/www/cal.defintek.io/public_html
+
+    # SSL 配置
+    SSLCertificateFile    /etc/letsencrypt/live/defintek.io/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/defintek.io/privkey.pem
+
+    # 代理到後端服務
+    ProxyPass / http://127.0.0.1:5000/
+    ProxyPassReverse / http://127.0.0.1:5000/
+
+    # WebSocket 支援
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) "ws://127.0.0.1:5000/$1" [P,L]
+</VirtualHost>
+
+# HTTP 重定向到 HTTPS
+<VirtualHost *:80>
+    ServerName cal.defintek.io
+    Redirect permanent / https://cal.defintek.io/
+</VirtualHost>
+```
+
+## 4. WordPress 整合
+
+### .htaccess 排除規則
+```apache
+# 在 WordPress 重寫規則中排除其他服務
+RewriteCond %{REQUEST_URI} !^/s2t
+RewriteCond %{REQUEST_URI} !^/blockchain-demo
+RewriteCond %{REQUEST_URI} !^/public-private-key-demo
+# 注意：cal 現在使用子域名，不需要在主站點排除
+```
+
+## 5. 服務管理模式
+
+### 使用 systemd 服務
+```ini
+# demos.service - 管理多個 Node.js 應用
+[Unit]
+Description=Blockchain and Public-Private Key Demos
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/www/defintek.io/start-demos.sh
+RemainAfterExit=yes
+User=reyerchu
+Group=reyerchu
+```
+
+### 啟動腳本模式
+```bash
+#!/bin/bash
+# 使用 PM2 管理 Node.js 應用
+export PORT=3010 
+pm2 start /var/www/defintek.io/public_html/blockchain-demo/bin/www --name blockchain-demo
+
+export PORT=3001 
+pm2 start /var/www/defintek.io/public_html/public-private-key-demo/bin/www --name public-private-key-demo
+```
+
+## 6. 關鍵配置要點
+
+1. **路徑衝突處理**: 使用 `RewriteCond` 排除特定路徑
+2. **靜態檔案優化**: 使用 `Alias` 直接服務靜態檔案
+3. **API 路由分離**: 使用 `<Location>` 區塊處理 API 請求
+4. **SSL 終止**: 在 Apache 層處理 SSL，後端服務使用 HTTP
+5. **日誌分離**: 為不同服務配置獨立的日誌檔案
+6. **子域名隔離**: 對於複雜應用使用子域名避免路徑衝突
+
+## 7. 子域名配置的優勢
+
+### 為什麼選擇子域名而不是路徑代理？
+
+1. **避免 Next.js basePath 問題**: Next.js 應用不需要特殊配置
+2. **更好的隔離**: 每個服務有獨立的 VirtualHost
+3. **簡化的配置**: 不需要複雜的重寫規則
+4. **更好的性能**: 直接代理，沒有路徑處理開銷
+5. **更容易維護**: 配置更清晰，故障排除更容易
+
+### 子域名配置步驟
+
+1. **創建 VirtualHost 配置**:
+   ```bash
+   sudo nano /etc/apache2/sites-available/cal-defintek-io.conf
+   ```
+
+2. **創建目錄結構**:
+   ```bash
+   sudo mkdir -p /var/www/cal.defintek.io/public_html
+   sudo chown -R www-data:www-data /var/www/cal.defintek.io
+   ```
+
+3. **啟用站點**:
+   ```bash
+   sudo a2ensite cal-defintek-io.conf
+   sudo systemctl reload apache2
+   ```
+
+4. **設置 DNS 記錄**:
+   ```
+   cal.defintek.io.    A    [伺服器 IP]
+   ```
+
+## 8. 實際配置範例
+
+### blockchain-demo 完整配置
+```apache
+# 代理到後端服務
+ProxyPass /blockchain-demo http://localhost:3010/
+ProxyPassReverse /blockchain-demo http://localhost:3010/
+
+# 靜態檔案直接服務
+Alias /blockchain-demo/stylesheets "/var/www/defintek.io/public_html/blockchain-demo/public/stylesheets"
+Alias /blockchain-demo/javascripts "/var/www/defintek.io/public_html/blockchain-demo/public/javascripts"
+Alias /blockchain-demo/images "/var/www/defintek.io/public_html/blockchain-demo/public/images"
+Alias /blockchain-demo/favicon.ico "/var/www/defintek.io/public_html/blockchain-demo/public/favicon.ico"
+
+<Directory "/var/www/defintek.io/public_html/blockchain-demo/public">
+    Options Indexes FollowSymLinks
+    AllowOverride All
+    Require all granted
+    Order allow,deny
+    Allow from all
+</Directory>
+
+# 重寫規則處理所有路徑
+RewriteEngine On
+RewriteCond %{REQUEST_URI} ^/blockchain-demo
+RewriteCond %{REQUEST_URI} !^/blockchain-demo/(stylesheets|javascripts|images|favicon.ico)
+RewriteRule ^/blockchain-demo/(.*) http://localhost:3010/$1 [P,L]
+```
+
+### s2t 完整配置
+```apache
+# 後端 API 代理
+<Location /s2t/api>
+    ProxyPass http://127.0.0.1:8002/s2t/api
+    ProxyPassReverse http://127.0.0.1:8002/s2t/api
+</Location>
+
+# 前端靜態檔案
+Alias /s2t/static /var/www/defintek.io/public_html/s2t/static
+<Directory /var/www/defintek.io/public_html/s2t/static>
+    Options -Indexes +FollowSymLinks
+    AllowOverride All
+    Require all granted
+</Directory>
+
+# 排除 API 路徑的重寫
+RewriteCond %{REQUEST_URI} ^/s2t/api
+RewriteRule ^ - [L]
+
+# React Router 支援
+RewriteCond %{REQUEST_URI} ^/s2t
+RewriteCond %{REQUEST_URI} !^/s2t/static
+RewriteCond %{REQUEST_URI} !^/s2t/api
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^/s2t(.*)$ /s2t/static/index.html [L]
+```
+
+### cal.defintek.io 完整配置
+```apache
+<VirtualHost *:443>
+    ServerAdmin webmaster@defintek.io
+    ServerName cal.defintek.io
+    DocumentRoot /var/www/cal.defintek.io/public_html
+
+    # SSL 配置
+    SSLCertificateFile    /etc/letsencrypt/live/defintek.io/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/defintek.io/privkey.pem
+
+    # 安全標頭
+    Header always set Strict-Transport-Security "max-age=15552000; includeSubdomains; preload"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+
+    # 代理到 Cal.com 服務
+    ProxyPass / http://127.0.0.1:5000/
+    ProxyPassReverse / http://127.0.0.1:5000/
+
+    # WebSocket 支援
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) "ws://127.0.0.1:5000/$1" [P,L]
+
+    # 日誌設置
+    ErrorLog ${APACHE_LOG_DIR}/cal_error.log
+    CustomLog ${APACHE_LOG_DIR}/cal_access.log combined
+</VirtualHost>
+
+# HTTP 重定向到 HTTPS
+<VirtualHost *:80>
+    ServerName cal.defintek.io
+    Redirect permanent / https://cal.defintek.io/
+</VirtualHost>
+```
+
+## 9. 總結
+
+這種架構允許您在同一台伺服器上運行多個不同的應用，同時保持 WordPress 作為主要網站的功能。關鍵是要正確處理路徑衝突、靜態檔案服務和 API 路由分離。
+
+### 主要優點：
+- 統一管理多個服務
+- 共享 SSL 證書
+- 統一的日誌和監控
+- 成本效益高
+- 子域名提供更好的隔離
+
+### 注意事項：
+- 需要仔細規劃路徑結構
+- 要處理好服務間的衝突
+- 需要正確配置重寫規則
+- 對於 Next.js 等 SPA 應用，子域名是更好的選擇
+- 需要設置正確的 DNS 記錄 
