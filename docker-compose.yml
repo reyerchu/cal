@@ -19,17 +19,26 @@ services:
   calcom:
     image: calcom/cal.com:latest
     restart: always
-    env_file:
-      - .env
     ports:
       - "5000:3000"
+    environment:
+      - DATABASE_URL=postgresql://cal:cal@db:5432/cal
+      - NEXT_PUBLIC_WEBAPP_URL=https://cal.defintek.io
+      - BUILT_NEXT_PUBLIC_WEBAPP_URL=https://cal.defintek.io
+      - CALENDSO_ENCRYPTION_KEY=a-very-secret-32-bit-random-string
+      - NEXTAUTH_SECRET=a-very-secret-string
+      - NEXTAUTH_URL=https://cal.defintek.io
+      - NEXT_PUBLIC_LICENSE_CONSENT=true
+      - ALLOWED_HOSTNAMES=["cal.defintek.io","localhost"]
+      - GOOGLE_LOGIN_ENABLED=true
+      - GOOGLE_API_CREDENTIALS={"web":{"client_id":"YOUR_GOOGLE_CLIENT_ID","project_id":"YOUR_GOOGLE_PROJECT_ID","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_secret":"YOUR_GOOGLE_CLIENT_SECRET","redirect_uris":["https://cal.defintek.io/api/auth/callback/google","https://cal.defintek.io/api/integrations/googlecalendar/callback"]}}
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - calcom_data:/calcom
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
