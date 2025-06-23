@@ -16,7 +16,7 @@ import { LicenseKeySingleton } from "@calcom/ee/common/server/LicenseKeyService"
 import createUsersAndConnectToOrg from "@calcom/features/ee/dsync/lib/users/createUsersAndConnectToOrg";
 import ImpersonationProvider from "@calcom/features/ee/impersonation/lib/ImpersonationProvider";
 import { getOrgFullOrigin, subdomainSuffix } from "@calcom/features/ee/organizations/lib/orgDomains";
-import { clientSecretVerifier, hostedCal, isSAMLLoginEnabled } from "@calcom/features/ee/sso/lib/saml";
+import { clientSecretVerifier, isSAMLLoginEnabled } from "@calcom/features/ee/sso/lib/saml";
 import { checkRateLimitAndThrowError } from "@calcom/lib/checkRateLimitAndThrowError";
 import {
   GOOGLE_CALENDAR_SCOPES,
@@ -42,7 +42,6 @@ import { CreationSource } from "@calcom/prisma/enums";
 import { IdentityProvider, MembershipRole } from "@calcom/prisma/enums";
 import { teamMetadataSchema, userMetadata } from "@calcom/prisma/zod-utils";
 
-import { getOrgUsernameFromEmail } from "../signup/utils/getOrgUsernameFromEmail";
 import { ErrorCode } from "./ErrorCode";
 import { dub } from "./dub";
 import { isPasswordValid } from "./isPasswordValid";
@@ -871,10 +870,8 @@ export const getOptions = ({
           }
         }
 
-        // If there's no existing user for this identity provider and id, create
-        // a new account. If an account already exists with the incoming email
-        // address return an error for now.
-
+        // If there's no existing user for this identity provider and id, check if user exists with email
+        // If no user exists, return error (registration disabled)
         const existingUserWithEmail = await prisma.user.findUnique({
           where: {
             email: user.email,
@@ -972,6 +969,10 @@ export const getOptions = ({
           }
           return `/auth/error?error=wrong-provider&provider=${existingUserWithEmail.identityProvider}`;
         }
+
+        // DISABLE NEW USER REGISTRATION - Only allow existing users to login
+        // Return error for new users trying to sign up
+        return `/auth/error?error=registration-disabled&message=New user registration is disabled. Only existing users can login with Google.`;
 
         // Associate with organization if enabled by flag and idP is Google (for now)
         const { orgUsername, orgId } = await checkIfUserShouldBelongToOrg(idP, user.email);
